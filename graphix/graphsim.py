@@ -410,3 +410,72 @@ class GraphState(nx.Graph):
             if self.nodes[mapping[i]]["hollow"]:
                 gstate.evolve_single(Ops.h, i)
         return gstate
+
+
+class Node:
+    """command format
+    E: pair node's index(>=0)
+    M: -1
+    X: -2
+    Z: -3
+    C: -4
+    """
+
+    def __init__(self, node_index, seq, Mprop, Xsignal, Zsignal, vop, output):
+        self.index = node_index
+        self.seq = seq  # composed of [E, M, X, Z, C]
+        self.Mprop = Mprop
+        self.result = None
+        self.Xsignal = Xsignal  # appeared only once
+        self.Zsignal = Zsignal  # appeared at most e + 1
+        self.vop = vop
+        self.output = output
+        self.result = None  # measurement result
+
+    def commute_X(self):
+        if -2 not in self.seq:
+            return []
+        Xpos = self.seq.index(-2)
+        EXcommutated_nodes = []
+        for i in range(Xpos, len(self.seq)):
+            if self.seq[i] >= 0:
+                EXcommutated_nodes.append(self.seq[i])
+        self.seq.remove(-2)
+        if self.output:
+            self.seq.append(-2)  # put X on the end of the pattern
+        else:
+            self.Mprop[2] += self.Xsignal
+        return EXcommutated_nodes
+
+    def commute_Z(self):
+        z_in_seq = False
+        while -3 in self.seq:
+            z_in_seq = True
+            self.seq.remove(-3)
+        if self.output and z_in_seq:
+            self.seq.append(-3)
+        else:
+            self.Mprop[3] += self.Zsignal
+            self.Zsignal = []
+
+    def _add_Z(self, pair, signal):
+        # caused by EX commutation.
+        self.Zsignal += signal
+        Epos = self.seq.index(pair)
+        self.seq.insert(Epos + 1, -3)
+
+    def print_pattern(self):
+        for cmd in self.seq:
+            print(self.get_command(cmd))
+
+    def get_command(self, cmd):
+        if cmd >= 0:
+            return ["E", (self.index, cmd)]
+        elif cmd == -1:
+            return ["M", self.index] + self.Mprop
+        elif cmd == -2:
+            return ["X", self.index, self.Xsignal]
+        elif cmd == -3:
+            return ["Z", self.index, self.Zsignal]
+        elif cmd == -4:
+            return ["C", self.index, self.vop]

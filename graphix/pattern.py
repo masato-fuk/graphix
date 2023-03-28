@@ -4,9 +4,10 @@ ref: V. Danos, E. Kashefi and P. Panangaden. J. ACM 54.2 8 (2007)
 import numpy as np
 import networkx as nx
 from graphix.simulator import PatternSimulator
-from graphix.graphsim import GraphState
+from graphix.graphsim import GraphState, Node
 from graphix.clifford import CLIFFORD_CONJ, CLIFFORD_TO_QASM3, CLIFFORD_MUL
 from copy import deepcopy
+from ordered_set import OrderedSet as oset
 
 
 class Pattern:
@@ -41,7 +42,7 @@ class Pattern:
         total number of nodes in the resource state
     """
 
-    def __init__(self, width=0):
+    def __init__(self, width=0, output_nodes=[]):
         """
         :param width:  number of input/output qubits
         """
@@ -49,7 +50,7 @@ class Pattern:
         self.width = width
         self.seq = [["N", i] for i in range(width)]  # where command sequence is stored
         self.results = {}  # measurement results from the graph state simulator
-        self.output_nodes = []  # output nodes
+        self.output_nodes = output_nodes  # output nodes
         self.Nnode = width  # total number of nodes in the graph state
 
     def add(self, cmd):
@@ -99,8 +100,10 @@ class Pattern:
         output_nodes: list of int
             output nodes order determined by user. each index corresponds to that of logical qubits.
         """
-        assert set(self.output_nodes) == set(output_nodes)
         self.output_nodes = output_nodes
+
+    def get_output_nodes(self):
+        return self.output_nodes
 
     def __repr__(self):
         return f"graphix.pattern.Pattern object with {len(self.seq)} commands and {self.width} output qubits"
@@ -171,6 +174,47 @@ class Pattern:
 
         if len(self.seq) > i + 1:
             print(f"{len(self.seq)-lim} more commands truncated. Change lim argument of print_pattern() to show more")
+
+    def get_cgraph(self):
+        node_prop = dict()
+        mflow = []
+        for cmd in self.seq:
+            if cmd[0] == "N":
+                node_prop[cmd[1]] = {
+                    "seq": [],
+                    "Mprop": [],
+                    "Xsignal": [],
+                    "Zsignal": [],
+                    "vop": None,
+                    "output": False,
+                }
+            elif cmd[0] == "E":
+                node_prop[cmd[1][1]]["seq"].append(cmd[1][0])
+                node_prop[cmd[1][0]]["seq"].append(cmd[1][1])
+            elif cmd[0] == "M":
+                node_prop[cmd[1]]["Mprop"] = cmd[2:]
+                node_prop[cmd[1]]["seq"].append(-1)
+                mflow.append(cmd[1])
+            elif cmd[0] == "X":
+                node_prop[cmd[1]]["Xsignal"] += cmd[2]
+                node_prop[cmd[1]]["seq"].append(-2)
+            elif cmd[0] == "Z":
+                node_prop[cmd[1]]["Zsignal"] += cmd[2]
+                node_prop[cmd[1]]["seq"].append(-3)
+            elif cmd[0] == "C":
+                node_prop[cmd[1]]["vop"] = cmd[2]
+                node_prop[cmd[1]]["seq"].append(-4)
+            elif cmd[0] == "S":
+                raise NotImplementedError()
+            else:
+                raise ValueError(f"command {cmd} is invalid!")
+        nodes = dict()
+        for index in node_prop.keys():
+            if index in self.output_nodes:
+                node_prop[index]["output"] = True
+            node = Node(index, **node_prop[index])
+            nodes[index] = node
+        return cPattern(nodes, self.output_nodes, mflow)
 
     def standardize(self):
         """Executes standardization of the pattern.
@@ -901,6 +945,9 @@ class Pattern:
 
         self.seq = new
 
+    def largest_intermediate(self):
+        return 2 ** self.max_space()
+
     def max_space(self):
         """The maximum number of nodes that must be present in the graph (graph space) during the execution of the pattern.
         For statevector simulation, this is equivalent to the maximum memory
@@ -996,6 +1043,87 @@ class Pattern:
             for command in self.seq:
                 for line in cmd_to_qasm3(command):
                     file.write(line)
+
+
+class cPattern:
+    def __init__(self, nodes=dict(), output_nodes=[], mflow=[], signalshiftingflow=None):
+        self.nodes = nodes
+        self.output_nodes = output_nodes
+        self.mflow = mflow
+        self.ssf = signalshiftingflow
+        self.active_nodes = []
+
+    def Xshift(self):
+        for index, node in self.nodes.items():
+            EXcomutation = node.commute_X()
+            for target_index in EXcomutation:
+                self.nodes[target_index]._add_Z(index, node.Xsignal)
+            if not node.output:
+                node.Xsignal = []
+
+    def Zshift(self):
+        for node in self.nodes.values():
+            node.commute_Z()
+
+    def standardize(self):
+        self.Xshift()
+        self.Zshift()
+
+    def shift_signals(self):
+        if self.ssf:
+            pass
+        else:
+            pass
+
+    def simulate_pattern(self, backend="statevector", **kwargs):
+        pass
+
+    def perform_pauli_measurements(self):
+        pass
+
+    def get_subpattern(self):
+        pass
+
+    def get_graph(self):
+        nodes = []
+        edges = []
+        for index, node in self.nodes.items():
+            nodes.append(index)
+            for cmd in node.seq:
+                if cmd >= 0:
+                    if index > cmd:
+                        edges.append((cmd, index))
+        return nodes, edges
+
+    # convert cgraph into usual pattern
+    # now only standardized pattern can be obtained
+    def get_pattern(self):
+        pattern = Pattern(width=len(self.nodes), output_nodes=self.output_nodes)
+        Eseq = []
+        Mseq = []
+        Xseq = []
+        Zseq = []
+        Cseq = []
+        for node_index in self.mflow + self.output_nodes:
+            node = self.nodes[node_index]
+            for cmd in node.seq:
+                if cmd >= 0:
+                    Eseq.append(node.get_command(cmd))
+                    self.nodes[cmd].seq.remove(node_index)
+                elif cmd == -1:
+                    Mseq.append(node.get_command(cmd))
+                elif cmd == -2:
+                    Xseq.append(node.get_command(cmd))
+                elif cmd == -3:
+                    Zseq.append(node.get_command(cmd))
+                elif cmd == -4:
+                    Cseq.append(node.get_command(cmd))
+                else:
+                    raise ValueError(f"command {cmd} is invalid!")
+            if node.result is not None:
+                pattern.results[node.index] = node.result
+        pattern.seq += Eseq + Mseq + Xseq + Zseq + Cseq
+        return pattern
 
 
 def measure_pauli(pattern, copy=False):
